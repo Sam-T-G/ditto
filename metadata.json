@@ -1,0 +1,6 @@
+{
+  "name": "DocuMap & Annotate",
+  "description": "Upload a PDF to view extracted text, highlight and annotate it, export annotations, and view a generated concept map of the document.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
