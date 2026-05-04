@@ -150,13 +150,13 @@ const stmts = {
 
   // Annotations
   getAnnotationsByDoc: db.prepare(`
-    SELECT a.id, a.text, a.note, a.start_offset, a.end_offset,
+    SELECT a.id, a.text, a.note, a.start_offset, a.end_offset, a.created_at,
            GROUP_CONCAT(at.tag_id) AS tag_ids
     FROM   annotations a
     LEFT JOIN annotation_tags at ON at.annotation_id = a.id
     WHERE  a.document_id = ?
     GROUP  BY a.id
-    ORDER  BY a.start_offset
+    ORDER  BY a.created_at
   `),
   insertAnnotation: db.prepare(
     `INSERT INTO annotations (id, document_id, text, note, start_offset, end_offset, created_at, updated_at)
@@ -217,6 +217,7 @@ export function getDocumentFull(id: string) {
     note: row.note,
     startOffset: row.start_offset,
     endOffset: row.end_offset,
+    createdAt: row.created_at,
     tagIds: row.tag_ids ? row.tag_ids.split(',') : [],
   }));
 
@@ -314,6 +315,7 @@ export function insertAnnotation(params: {
     note: params.note,
     startOffset: params.startOffset,
     endOffset: params.endOffset,
+    createdAt: params.createdAt,
     tagIds,
   };
 }

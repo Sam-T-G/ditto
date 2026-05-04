@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Annotation, Tag } from '../types';
 import { cn } from '../lib/utils';
 import { getTagColor } from '../lib/tagColors';
 import { jsPDF } from 'jspdf';
+
+type SortMode = 'newest' | 'oldest' | 'in-text';
 
 interface HighlightsPanelProps {
   annotations: Annotation[];
@@ -27,6 +29,15 @@ export default function HighlightsPanel({
 }: HighlightsPanelProps) {
   const [openTagPickerId, setOpenTagPickerId] = useState<string | null>(null);
   const [newTagInput, setNewTagInput] = useState('');
+  const [sortMode, setSortMode] = useState<SortMode>('newest');
+
+  const sorted = useMemo(() => {
+    const arr = [...annotations];
+    if (sortMode === 'newest') arr.sort((a, b) => b.createdAt - a.createdAt);
+    else if (sortMode === 'oldest') arr.sort((a, b) => a.createdAt - b.createdAt);
+    else arr.sort((a, b) => a.startOffset - b.startOffset);
+    return arr;
+  }, [annotations, sortMode]);
 
   const handleExportPDF = () => {
     const doc = new jsPDF();
@@ -77,20 +88,43 @@ export default function HighlightsPanel({
 
   return (
     <div className="h-full flex flex-col bg-[#FCFAF7]">
-      <div className="p-8 flex justify-between items-end border-b border-[#E5E2DD] shrink-0">
-        <div>
-          <h3 className="text-xs font-bold uppercase tracking-widest">Recent Highlights</h3>
-          <span className="text-[10px] text-gray-400 italic block mt-1">{annotations.length} annotation{annotations.length !== 1 ? 's' : ''}</span>
+      <div className="px-8 pt-6 pb-4 border-b border-[#E5E2DD] shrink-0 space-y-3">
+        <div className="flex justify-between items-center">
+          <div>
+            <h3 className="text-xs font-bold uppercase tracking-widest">Annotations</h3>
+            <span className="text-[10px] text-gray-400 italic block mt-0.5">{annotations.length} entry{annotations.length !== 1 ? 's' : ''}</span>
+          </div>
+          <button
+            onClick={handleExportPDF}
+            className="px-4 py-1.5 text-xs bg-[#1A1A1A] text-white rounded-full flex items-center gap-2 hover:bg-black transition-colors"
+          >
+            <span>Export PDF</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M7 7l10 10M17 7v10H7" />
+            </svg>
+          </button>
         </div>
-        <button
-          onClick={handleExportPDF}
-          className="px-4 py-1.5 text-xs bg-[#1A1A1A] text-white rounded-full flex items-center gap-2 hover:bg-black transition-colors"
-        >
-          <span>Export PDF</span>
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M7 7l10 10M17 7v10H7" />
-          </svg>
-        </button>
+
+        {/* Sort controls */}
+        {annotations.length > 1 && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[9px] uppercase tracking-widest text-gray-400 mr-1">Sort</span>
+            {(['newest', 'oldest', 'in-text'] as SortMode[]).map(mode => (
+              <button
+                key={mode}
+                onClick={() => setSortMode(mode)}
+                className={cn(
+                  'px-2.5 py-1 text-[10px] font-semibold rounded-full transition-colors',
+                  sortMode === mode
+                    ? 'bg-[#1A1A1A] text-white'
+                    : 'bg-[#F3F1ED] text-gray-500 hover:bg-[#E8E5E0] hover:text-[#1A1A1A]'
+                )}
+              >
+                {mode === 'newest' ? 'Newest' : mode === 'oldest' ? 'Oldest' : 'In text'}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div
@@ -103,7 +137,7 @@ export default function HighlightsPanel({
             <p className="text-xs mt-2 italic">Select text in the document to annotate.</p>
           </div>
         ) : (
-          annotations.map(ann => {
+          sorted.map(ann => {
             const annTags = tags.filter(t => ann.tagIds.includes(t.id));
             const unusedTags = tags.filter(t => !ann.tagIds.includes(t.id));
 
@@ -224,7 +258,7 @@ export default function HighlightsPanel({
                 <textarea
                   className="w-full text-xs leading-relaxed resize-none outline-none bg-transparent placeholder-gray-400 font-sans"
                   rows={3}
-                  placeholder="Record your exegesis here…"
+                  placeholder="Add a note…"
                   value={ann.note}
                   onChange={e => onUpdateNote(ann.id, e.target.value)}
                   onClick={e => e.stopPropagation()}

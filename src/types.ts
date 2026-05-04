@@ -17,6 +17,7 @@ export interface Annotation {
   note: string;
   startOffset: number;
   endOffset: number;
+  createdAt: number;
   tagIds: string[];
 }
 

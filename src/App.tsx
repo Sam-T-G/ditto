@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import PDFUploader from './components/PDFUploader';
 import Viewer from './components/Viewer';
 import MapCanvas from './components/MapCanvas';
 import HighlightsPanel from './components/HighlightsPanel';
+import MetricsPanel from './components/MetricsPanel';
 import DocumentLibrary from './components/DocumentLibrary';
 import { DocumentData, Annotation, Tag, TagRelation, SelectionPayload } from './types';
 import { cn } from './lib/utils';
@@ -35,6 +36,14 @@ function SaveIndicator({ status }: { status: SaveStatus }) {
 
 // ── PDF text extraction ───────────────────────────────────────────────────────
 
+type PdfTextItem = {
+  str: string;
+  transform: number[]; // [a, b, c, d, x, y]
+  width: number;
+  height: number;
+  hasEOL: boolean;
+};
+
 async function extractPdfText(file: File): Promise<string> {
   const pdfjsLib = await import('pdfjs-dist');
   // @ts-ignore
@@ -43,13 +52,73 @@ async function extractPdfText(file: File): Promise<string> {
 
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-  let text = '';
+
+  const pages: string[] = [];
+
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    text += content.items.map((item: any) => item.str).join(' ') + '\n\n';
+
+    const items = (content.items as PdfTextItem[]).filter(it => it.str);
+    if (items.length === 0) { pages.push(''); continue; }
+
+    // Sort top-to-bottom (PDF y is from page bottom, so descending), left-to-right within a line
+    const sorted = [...items].sort((a, b) => {
+      const dy = b.transform[5] - a.transform[5];
+      if (Math.abs(dy) > 2) return dy;
+      return a.transform[4] - b.transform[4];
+    });
+
+    // Group into lines: items whose y-positions are within 50% of font height belong together
+    type Line = { y: number; height: number; items: PdfTextItem[] };
+    const lines: Line[] = [];
+    for (const item of sorted) {
+      const y = item.transform[5];
+      const h = Math.abs(item.height) || 10;
+      const last = lines[lines.length - 1];
+      if (last && Math.abs(last.y - y) <= last.height * 0.5) {
+        last.items.push(item);
+      } else {
+        lines.push({ y, height: h, items: [item] });
+      }
+    }
+
+    // Build text from lines; detect paragraph breaks via vertical gap
+    let pageText = '';
+    for (let j = 0; j < lines.length; j++) {
+      const line = lines[j];
+      line.items.sort((a, b) => a.transform[4] - b.transform[4]);
+
+      // Stitch items within the line, adding a space when there is an x-gap
+      let lineText = '';
+      for (let k = 0; k < line.items.length; k++) {
+        const item = line.items[k];
+        if (k === 0) {
+          lineText = item.str;
+        } else {
+          const prev = line.items[k - 1];
+          const gap = item.transform[4] - (prev.transform[4] + prev.width);
+          lineText += (gap > 0.5 ? ' ' : '') + item.str;
+        }
+        if (item.hasEOL) lineText += '\n';
+      }
+
+      if (j === 0) {
+        pageText = lineText;
+        continue;
+      }
+
+      const prev = lines[j - 1];
+      const vertGap = prev.y - line.y;
+      const avgHeight = (prev.height + line.height) / 2;
+      pageText += (vertGap > avgHeight * 1.5 ? '\n\n' : '\n') + lineText;
+    }
+
+    pages.push(pageText);
   }
-  return text.trim() || '(No extractable text found. This PDF may be image-based.)';
+
+  const full = pages.filter(Boolean).join('\n\n').trim();
+  return full || '(No extractable text found. This PDF may be image-based.)';
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -67,7 +136,18 @@ export default function App() {
   const [tagRelations,       setTagRelations]        = useState<TagRelation[]>([]);
   const [activeAnnotationId, setActiveAnnotationId] = useState<string | null>(null);
   const [activeTagId,        setActiveTagId]        = useState<string | null>(null);
-  const [activeTab,          setActiveTab]          = useState<'highlights' | 'map'>('highlights');
+  const [activeTab,          setActiveTab]          = useState<'highlights' | 'map' | 'metrics'>('highlights');
+
+  const tagCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const tag of tags) counts[tag.id] = 0;
+    for (const ann of annotations) {
+      for (const tid of ann.tagIds) {
+        if (tid in counts) counts[tid]++;
+      }
+    }
+    return counts;
+  }, [tags, annotations]);
 
   // Upload / save state
   const [isUploading,  setIsUploading]  = useState(false);
@@ -250,13 +330,21 @@ export default function App() {
 
   // ── Annotation management ───────────────────────────────────────────────────
 
-  const handleAddAnnotation = useCallback((payload: SelectionPayload) => {
+  const handleAddAnnotation = useCallback(async (payload: SelectionPayload) => {
     let finalTagIds = [...payload.tagIds];
-    let newTagOptimistic: Tag | null = null;
 
-    if (payload.newTagLabel?.trim()) {
-      newTagOptimistic = handleCreateTag(payload.newTagLabel);
-      finalTagIds = [...finalTagIds, newTagOptimistic.id];
+    if (payload.newTagLabel?.trim() && documentData) {
+      // Create tag server-side first so the annotation FK is valid
+      const colorKey = nextColorKey(tags.map(t => t.colorKey));
+      const optimisticTag: Tag = { id: nanoid(), label: payload.newTagLabel.trim(), colorKey };
+      setTags(prev => [...prev, optimisticTag]);
+      try {
+        const serverTag = await api.tags.create(documentData.id, optimisticTag.label, colorKey);
+        setTags(prev => prev.map(t => t.id === optimisticTag.id ? serverTag : t));
+        finalTagIds = [...finalTagIds, serverTag.id];
+      } catch {
+        finalTagIds = [...finalTagIds, optimisticTag.id]; // best-effort fallback
+      }
     }
 
     const optimistic: Annotation = {
@@ -265,6 +353,7 @@ export default function App() {
       startOffset: payload.startOffset,
       endOffset: payload.endOffset,
       note: '',
+      createdAt: Date.now(),
       tagIds: finalTagIds,
     };
 
@@ -286,7 +375,7 @@ export default function App() {
         })
       );
     }
-  }, [documentData, handleCreateTag, sync]);
+  }, [documentData, tags, sync]);
 
   const handleUpdateNote = useCallback((id: string, note: string) => {
     setAnnotations(prev => prev.map(a => a.id === id ? { ...a, note } : a));
@@ -383,26 +472,21 @@ export default function App() {
       </header>
 
       <main className="flex-1 grid grid-cols-12 overflow-hidden">
-        <section className="col-span-7 border-r border-[#E5E2DD] bg-white p-12 overflow-hidden flex flex-col">
-          <div className="max-w-3xl w-full mx-auto flex flex-col h-full shadow-[0_2px_10px_rgba(0,0,0,0.02)] border border-[#F3F1ED] p-12 relative">
-            <span className="absolute top-6 left-12 text-[10px] uppercase opacity-40 tracking-widest font-semibold">Document Reference</span>
-            <div className="flex-1 overflow-auto custom-scrollbar pt-8">
-              <Viewer
-                text={documentData.text}
-                annotations={annotations}
-                tags={tags}
-                onAddAnnotation={handleAddAnnotation}
-                onSelectHighlight={id => { setActiveAnnotationId(id); setActiveTab('highlights'); }}
-                activeAnnotationId={activeAnnotationId}
-                activeTagId={activeTagId}
-              />
-            </div>
-          </div>
+        <section className="col-span-7 border-r border-[#E5E2DD] overflow-hidden flex flex-col">
+          <Viewer
+            documentId={documentData.id}
+            annotations={annotations}
+            tags={tags}
+            onAddAnnotation={handleAddAnnotation}
+            onSelectHighlight={id => { setActiveAnnotationId(id); setActiveTab('highlights'); }}
+            activeAnnotationId={activeAnnotationId}
+            activeTagId={activeTagId}
+          />
         </section>
 
         <aside className="col-span-5 flex flex-col overflow-hidden bg-[#FCFAF7]">
           <div className="flex border-b border-[#E5E2DD] shrink-0">
-            {(['highlights', 'map'] as const).map(tab => (
+            {(['highlights', 'map', 'metrics'] as const).map(tab => (
               <button
                 key={tab}
                 className={cn(
@@ -413,7 +497,7 @@ export default function App() {
                 )}
                 onClick={() => setActiveTab(tab)}
               >
-                {tab === 'highlights' ? 'Annotations' : 'Adjacency Map'}
+                {tab === 'highlights' ? 'Annotations' : tab === 'map' ? 'Map' : 'Metrics'}
               </button>
             ))}
           </div>
@@ -430,6 +514,12 @@ export default function App() {
                 onTagAnnotation={handleTagAnnotation}
                 onCreateTag={handleCreateTag}
               />
+            ) : activeTab === 'metrics' ? (
+              <MetricsPanel
+                annotations={annotations}
+                tags={tags}
+                tagRelations={tagRelations}
+              />
             ) : (
               <div className="h-full flex flex-col overflow-hidden">
                 <div className="px-8 pt-6 pb-4 border-b border-[#E5E2DD] shrink-0">
@@ -441,8 +531,11 @@ export default function App() {
                 </div>
                 <div className="relative flex-1 overflow-hidden">
                   <MapCanvas
+                    documentId={documentData.id}
                     tags={tags}
                     tagRelations={tagRelations}
+                    tagCounts={tagCounts}
+                    annotations={annotations}
                     activeTagId={activeTagId}
                     onSelectTag={id => setActiveTagId(id === activeTagId ? null : id)}
                     onCreateRelation={handleCreateRelation}
