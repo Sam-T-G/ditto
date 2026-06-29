@@ -126,4 +126,4 @@ Tailwind CSS v4 via `@tailwindcss/vite` — no `tailwind.config.*` needed. `cn()
 
 ## Working with AI here
 
-`npm run lint` is `tsc --noEmit` and there is no test suite, so a green type-check is not proof of correct behavior. The subtle correctness lives in the stateful seams: optimistic updates reconciling nanoid IDs against server IDs, the 500ms note debounce racing a delete, cascade deletes and FK integrity, the 409-on-duplicate-relation path. An agent will get the CRUD boilerplate right and quietly mishandle one of these. Trace the data flow by hand, or add a focused test stating what "correct" means, before trusting a change to `App.tsx` sync or `server/db.ts`. Confirm any new dependency is actually installed and that imports resolve.
+`npm run lint` is `tsc --noEmit` and there is no test suite, so a green type-check says nothing about runtime behavior here. The correctness seams to check before trusting a change to `App.tsx` sync or `server/db.ts`: optimistic updates reconciling nanoid IDs against server IDs, the 500ms note debounce racing a delete, cascade deletes and FK integrity, the 409-on-duplicate-relation path.
